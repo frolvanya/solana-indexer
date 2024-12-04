@@ -12,8 +12,16 @@ use solana_sdk::{commitment_config::CommitmentConfig, pubkey::Pubkey};
 use solana_transaction_status::{UiMessage, UiRawMessage, UiTransactionEncoding};
 use solana_transaction_status_client_types::UiTransaction;
 
-const FINALIZE_DEPOSIT_DISCRIMINATOR: [u8; 8] = [240, 178, 165, 14, 221, 29, 104, 47];
-const FINALIZE_WITHDRAW_DISCRIMINATOR: [u8; 8] = [17, 72, 11, 172, 214, 42, 12, 23];
+const INIT_TRANSFER_DISCRIMINATOR: [u8; 8] = [174, 50, 134, 99, 122, 243, 243, 224];
+const FINALIZE_TRANSFER_DISCRIMINATOR: [u8; 8] = [124, 126, 103, 188, 144, 65, 135, 51];
+
+#[derive(Debug)]
+pub struct InitTransferPayload {
+    pub amount: u128,
+    pub recipient: String,
+    pub fee: u128,
+    pub native_fee: u64,
+}
 
 #[tokio::main]
 async fn main() {
@@ -130,11 +138,44 @@ fn decode_instruction(data: &str) -> Option<String> {
     println!("Raw Data: {:?}", data);
     println!("Decoded Data: {:?}", decoded_data);
 
-    if decoded_data.starts_with(&FINALIZE_DEPOSIT_DISCRIMINATOR) {
-        Some("finalize_deposit".to_string())
-    } else if decoded_data.starts_with(&FINALIZE_WITHDRAW_DISCRIMINATOR) {
-        Some("finalize_withdraw".to_string())
+    if decoded_data.starts_with(&INIT_TRANSFER_DISCRIMINATOR) {
+        let payload_data = &decoded_data[INIT_TRANSFER_DISCRIMINATOR.len()..];
+
+        if let Some(payload) = parse_init_transfer_payload(payload_data) {
+            return Some(format!("init_transfer: {:?}", payload));
+        }
+
+        None
+    } else if decoded_data.starts_with(&FINALIZE_TRANSFER_DISCRIMINATOR) {
+        Some("finalize_transfer".to_string())
     } else {
         None
     }
+}
+
+fn parse_init_transfer_payload(data: &[u8]) -> Option<InitTransferPayload> {
+    let mut offset = 0;
+
+    let mut get_slice = |len: usize| {
+        if offset + len <= data.len() {
+            let slice = &data[offset..offset + len];
+            offset += len;
+            Some(slice)
+        } else {
+            None
+        }
+    };
+
+    let amount = u128::from_le_bytes(get_slice(16)?.try_into().ok()?);
+    let recipient_len = u32::from_le_bytes(get_slice(4)?.try_into().ok()?);
+    let recipient = String::from_utf8(get_slice(recipient_len as usize)?.to_vec()).ok()?;
+    let fee = u128::from_le_bytes(get_slice(16)?.try_into().ok()?);
+    let native_fee = u64::from_le_bytes(get_slice(8)?.try_into().ok()?);
+
+    Some(InitTransferPayload {
+        amount,
+        recipient,
+        fee,
+        native_fee,
+    })
 }
