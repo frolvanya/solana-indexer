@@ -1,5 +1,7 @@
 use std::str::FromStr;
 
+use anchor_lang::prelude::borsh;
+use anchor_lang::AnchorDeserialize;
 use anyhow::Result;
 use futures_util::StreamExt;
 
@@ -9,18 +11,31 @@ use solana_client::rpc_config::{RpcTransactionLogsConfig, RpcTransactionLogsFilt
 use solana_client::rpc_response::RpcConfirmedTransactionStatusWithSignature;
 use solana_sdk::signature::Signature;
 use solana_sdk::{commitment_config::CommitmentConfig, pubkey::Pubkey};
-use solana_transaction_status::{UiMessage, UiRawMessage, UiTransactionEncoding};
-use solana_transaction_status_client_types::UiTransaction;
+use solana_transaction_status::{UiMessage, UiRawMessage, UiTransaction, UiTransactionEncoding};
 
 const INIT_TRANSFER_DISCRIMINATOR: [u8; 8] = [174, 50, 134, 99, 122, 243, 243, 224];
 const FINALIZE_TRANSFER_DISCRIMINATOR: [u8; 8] = [124, 126, 103, 188, 144, 65, 135, 51];
 
-#[derive(Debug)]
+#[derive(Debug, AnchorDeserialize)]
 pub struct InitTransferPayload {
     pub amount: u128,
     pub recipient: String,
     pub fee: u128,
     pub native_fee: u64,
+}
+
+#[derive(Debug, AnchorDeserialize)]
+pub struct TransferId {
+    pub origin_chain: u8,
+    pub origin_nonce: u64,
+}
+
+#[derive(Debug, AnchorDeserialize)]
+pub struct FinalizeTransferPayload {
+    pub destination_nonce: u64,
+    pub transfer_id: TransferId,
+    pub amount: u128,
+    pub fee_recipient: Option<String>,
 }
 
 #[tokio::main]
@@ -108,74 +123,53 @@ async fn fetch_recent_logs(http_url: &str, program_account: &str) -> Result<()> 
 }
 
 fn print_tx_info(tx: &UiTransaction, signature: Signature) -> Result<()> {
-    println!();
-    println!("Transaction Signature: {}", signature);
-
     match tx.message {
         UiMessage::Parsed(_) => panic!("Unsupported transaction encoding"),
-        UiMessage::Raw(ref raw) => print_raw_message(raw),
+        UiMessage::Raw(ref raw) => print_raw_message(raw, signature),
     }
 
     Ok(())
 }
 
-fn print_raw_message(message: &UiRawMessage) {
-    println!("Transaction Message (raw):");
-    println!("  Account Keys: {:?}", message.account_keys);
-    println!("  Recent Blockhash: {:?}", message.recent_blockhash);
-
+fn print_raw_message(message: &UiRawMessage, signature: Signature) {
     for instruction in message.instructions.clone() {
         let index = instruction.program_id_index as usize;
         let program_id = message.account_keys[index].clone();
-        let method = decode_instruction(&instruction.data);
 
-        println!("Program ID: {}, Method: {:?}", program_id, method);
+        if let Some(method) = decode_instruction(&instruction.data) {
+            println!("Transaction Signature: {}", signature);
+            println!("Transaction Message (raw):");
+            println!("  Account Keys: {:?}", message.account_keys);
+            println!("  Recent Blockhash: {:?}", message.recent_blockhash);
+            println!("Program ID: {}, Method: {:?}\n", program_id, method);
+        }
     }
 }
 
 fn decode_instruction(data: &str) -> Option<String> {
     let decoded_data = bs58::decode(data).into_vec().ok()?;
-    println!("Raw Data: {:?}", data);
-    println!("Decoded Data: {:?}", decoded_data);
+    println!("Raw data: {:?}", decoded_data);
 
     if decoded_data.starts_with(&INIT_TRANSFER_DISCRIMINATOR) {
-        let payload_data = &decoded_data[INIT_TRANSFER_DISCRIMINATOR.len()..];
+        let payload_data = &decoded_data[8..];
 
-        if let Some(payload) = parse_init_transfer_payload(payload_data) {
-            return Some(format!("init_transfer: {:?}", payload));
+        if let Ok(payload) = InitTransferPayload::try_from_slice(payload_data) {
+            Some(format!("init_transfer: {:?}", payload))
+        } else {
+            Some("init_transfer: Data cannot be deserialized".to_string())
         }
-
-        None
     } else if decoded_data.starts_with(&FINALIZE_TRANSFER_DISCRIMINATOR) {
-        Some("finalize_transfer".to_string())
+        let payload_data = &decoded_data[8..];
+        match FinalizeTransferPayload::try_from_slice(payload_data) {
+            Ok(payload) => println!("{:?}", payload),
+            Err(err) => println!("Failed to deserialize payload: {:?}", err),
+        }
+        if let Ok(payload) = FinalizeTransferPayload::try_from_slice(payload_data) {
+            Some(format!("finalize_transfer: {:?}", payload))
+        } else {
+            Some("finalize_transfer: Data cannot be deserialized".to_string())
+        }
     } else {
         None
     }
-}
-
-fn parse_init_transfer_payload(data: &[u8]) -> Option<InitTransferPayload> {
-    let mut offset = 0;
-
-    let mut get_slice = |len: usize| {
-        if offset + len <= data.len() {
-            let slice = &data[offset..offset + len];
-            offset += len;
-            Some(slice)
-        } else {
-            None
-        }
-    };
-
-    let amount = u128::from_le_bytes(get_slice(16)?.try_into().ok()?);
-    let recipient_len = u32::from_le_bytes(get_slice(4)?.try_into().ok()?);
-    let recipient = String::from_utf8(get_slice(recipient_len as usize)?.to_vec()).ok()?;
-    let fee = u128::from_le_bytes(get_slice(16)?.try_into().ok()?);
-    let native_fee = u64::from_le_bytes(get_slice(8)?.try_into().ok()?);
-
-    Some(InitTransferPayload {
-        amount,
-        recipient,
-        fee,
-        native_fee,
-    })
 }
